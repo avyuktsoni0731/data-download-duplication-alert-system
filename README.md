@@ -91,163 +91,6 @@ This architecture provides a scalable, fault-tolerant system capable of handling
 
 The data model is crucial for efficient operation of the DDAS. Here's an expanded version of the database schema, including additional tables for more comprehensive metadata management:
 
-```sql
--- Users and Authentication
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    first_name VARCHAR(50),
-    last_name VARCHAR(50),
-    organization VARCHAR(100),
-    role VARCHAR(20) CHECK (role IN ('user', 'admin', 'manager')),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_login TIMESTAMP
-);
-
-CREATE TABLE user_permissions (
-    user_id INTEGER REFERENCES users(id),
-    permission VARCHAR(50) NOT NULL,
-    PRIMARY KEY (user_id, permission)
-);
-
--- Files and Metadata
-CREATE TABLE files (
-    id SERIAL PRIMARY KEY,
-    filename VARCHAR(255) NOT NULL,
-    file_path TEXT NOT NULL,
-    file_size BIGINT NOT NULL,
-    file_hash VARCHAR(64) NOT NULL,
-    mime_type VARCHAR(100),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_accessed TIMESTAMP,
-    is_deleted BOOLEAN DEFAULT FALSE,
-    deletion_date TIMESTAMP,
-    storage_tier VARCHAR(10) CHECK (storage_tier IN ('hot', 'cold'))
-);
-
-CREATE TABLE file_versions (
-    id SERIAL PRIMARY KEY,
-    file_id INTEGER REFERENCES files(id),
-    version_number INTEGER NOT NULL,
-    file_hash VARCHAR(64) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_by INTEGER REFERENCES users(id)
-);
-
-CREATE TABLE file_metadata (
-    id SERIAL PRIMARY KEY,
-    file_id INTEGER REFERENCES files(id),
-    metadata_key VARCHAR(100) NOT NULL,
-    metadata_value TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Downloads and Usage
-CREATE TABLE downloads (
-    id SERIAL PRIMARY KEY,
-    file_id INTEGER REFERENCES files(id),
-    user_id INTEGER REFERENCES users(id),
-    download_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    source_url TEXT,
-    ip_address INET,
-    user_agent TEXT
-);
-
-CREATE TABLE file_access_logs (
-    id SERIAL PRIMARY KEY,
-    file_id INTEGER REFERENCES files(id),
-    user_id INTEGER REFERENCES users(id),
-    access_type VARCHAR(20) CHECK (access_type IN ('view', 'download', 'modify')),
-    access_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    ip_address INET
-);
-
--- Datasets and Organizations
-CREATE TABLE datasets (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    description TEXT,
-    source_url TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_by INTEGER REFERENCES users(id),
-    is_public BOOLEAN DEFAULT FALSE
-);
-
-CREATE TABLE file_dataset_mapping (
-    file_id INTEGER REFERENCES files(id),
-    dataset_id INTEGER REFERENCES datasets(id),
-    PRIMARY KEY (file_id, dataset_id)
-);
-
-CREATE TABLE organizations (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    description TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE user_organization_mapping (
-    user_id INTEGER REFERENCES users(id),
-    organization_id INTEGER REFERENCES organizations(id),
-    role VARCHAR(20) CHECK (role IN ('member', 'admin')),
-    PRIMARY KEY (user_id, organization_id)
-);
-
--- Tags and Categories
-CREATE TABLE tags (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL
-);
-
-CREATE TABLE file_tags (
-    file_id INTEGER REFERENCES files(id),
-    tag_id INTEGER REFERENCES tags(id),
-    PRIMARY KEY (file_id, tag_id)
-);
-
-CREATE TABLE categories (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(50) UNIQUE NOT NULL,
-    parent_id INTEGER REFERENCES categories(id)
-);
-
-CREATE TABLE file_categories (
-    file_id INTEGER REFERENCES files(id),
-    category_id INTEGER REFERENCES categories(id),
-    PRIMARY KEY (file_id, category_id)
-);
-
--- Notifications and Alerts
-CREATE TABLE notifications (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
-    message TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    read_at TIMESTAMP,
-    notification_type VARCHAR(50)
-);
-
--- System Settings
-CREATE TABLE system_settings (
-    key VARCHAR(50) PRIMARY KEY,
-    value TEXT,
-    description TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create indexes for frequently accessed columns
-CREATE INDEX idx_files_file_hash ON files(file_hash);
-CREATE INDEX idx_downloads_user_id ON downloads(user_id);
-CREATE INDEX idx_file_access_logs_file_id ON file_access_logs(file_id);
-CREATE INDEX idx_file_access_logs_user_id ON file_access_logs(user_id);
-CREATE INDEX idx_file_metadata_file_id ON file_metadata(file_id);
-CREATE INDEX idx_file_metadata_key_value ON file_metadata(metadata_key, metadata_value);
-
-```
 
 This comprehensive data model allows for:
 - Detailed user management and permissions
@@ -263,116 +106,6 @@ This comprehensive data model allows for:
 
 Now, let's delve into the core functionalities of the DDAS, implemented in Python. We'll use SQLAlchemy for database operations and asyncio for asynchronous processing.
 
-```python
-import asyncio
-import hashlib
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.future import select
-from sqlalchemy.orm import sessionmaker
-from models import File, Download, User, FileMetadata
-from typing import Optional, Tuple
-
-async def calculate_file_hash(file_path: str) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _calculate_file_hash, file_path)
-
-def _calculate_file_hash(file_path: str) -> str:
-    sha256_hash = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(byte_block)
-    return sha256_hash.hexdigest()
-
-async def check_duplicate(session: AsyncSession, file_path: str, file_size: int) -> Tuple[bool, Optional[File]]:
-    file_hash = await calculate_file_hash(file_path)
-    
-    stmt = select(File).where(File.file_hash == file_hash, File.file_size == file_size)
-    result = await session.execute(stmt)
-    existing_file = result.scalar_one_or_none()
-    
-    return (True, existing_file) if existing_file else (False, None)
-
-async def handle_download_request(session: AsyncSession, user_id: int, file_url: str) -> dict:
-    # Download the file to a temporary location
-    temp_file_path = await download_file(file_url)
-    file_size = await get_file_size(temp_file_path)
-    
-    is_duplicate, existing_file = await check_duplicate(session, temp_file_path, file_size)
-    
-    if is_duplicate:
-        await send_duplicate_alert(session, user_id, existing_file)
-        await asyncio.to_thread(os.remove, temp_file_path)
-        return {"status": "duplicate", "existing_file": existing_file.to_dict()}
-    else:
-        permanent_file_path = await move_to_permanent_storage(temp_file_path)
-        new_file = await add_file_to_database(session, permanent_file_path, file_size, file_hash)
-        await update_download_history(session, user_id, new_file.id, file_url)
-        return {"status": "success", "new_file": new_file.to_dict()}
-
-async def send_duplicate_alert(session: AsyncSession, user_id: int, existing_file: File):
-    user = await session.get(User, user_id)
-    notification = Notification(
-        user_id=user_id,
-        message=f"Duplicate file detected: {existing_file.filename}",
-        notification_type="duplicate_alert"
-    )
-    session.add(notification)
-    await session.commit()
-    # Additional logic for sending email or push notification
-
-async def move_to_permanent_storage(temp_file_path: str) -> str:
-    # Implement logic to move file to permanent storage (e.g., S3, GCS)
-    # Return the new permanent file path
-    pass
-
-async def add_file_to_database(session: AsyncSession, file_path: str, file_size: int, file_hash: str) -> File:
-    new_file = File(
-        filename=os.path.basename(file_path),
-        file_path=file_path,
-        file_size=file_size,
-        file_hash=file_hash
-    )
-    session.add(new_file)
-    await session.commit()
-    return new_file
-
-async def update_download_history(session: AsyncSession, user_id: int, file_id: int, source_url: str):
-    download = Download(user_id=user_id, file_id=file_id, source_url=source_url)
-    session.add(download)
-    await session.commit()
-
-async def extract_metadata(session: AsyncSession, file_id: int, file_path: str):
-    # Extract metadata based on file type
-    metadata = await get_file_metadata(file_path)
-    for key, value in metadata.items():
-        file_metadata = FileMetadata(file_id=file_id, metadata_key=key, metadata_value=str(value))
-        session.add(file_metadata)
-    await session.commit()
-
-async def get_file_metadata(file_path: str) -> dict:
-    # Implement logic to extract metadata based on file type
-    # This could involve using libraries like python-magic, PyPDF2, netCDF4, etc.
-    pass
-
-# Additional helper functions
-async def download_file(url: str) -> str:
-    # Implement file download logic
-    pass
-
-async def get_file_size(file_path: str) -> int:
-    return await asyncio.to_thread(os.path.getsize, file_path)
-
-# Usage example
-async def main():
-    async_session = sessionmaker(engine, class_=AsyncSession)
-    async with async_session() as session:
-        result = await handle_download_request(session, user_id=1, file_url="http://example.com/dataset.nc")
-        print(result)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-```
 
 This implementation provides asynchronous operations for improved performance, robust error handling, and integration with the SQLAlchemy ORM for database operations.
 
@@ -380,8 +113,117 @@ This implementation provides asynchronous operations for improved performance, r
 
 For the user interface, we'll create a modern, responsive web application using React and Tailwind CSS. Here's a more comprehensive React component structure:
 
-```javascript
-// App.js
-import React from 'react';
-import { BrowserRouter as Router, Route, Switch } from 'react-router-dom';
-```
+# Technologies to be used
+
+
+### 1. **Frontend (User Interface)**
+   - **React.js**: A popular JavaScript library for building user interfaces. It’s efficient, component-based, and integrates well with back-end APIs.
+   - **Tailwind CSS**: A utility-first CSS framework for fast UI development. It pairs well with React for building responsive, modern, and clean UIs.
+   - **TypeScript**: Use TypeScript with React for type safety, which reduces bugs and improves code maintainability.
+
+   **Technologies**: 
+   - **React.js** with **Tailwind CSS** and **TypeScript**.
+
+### 2. **Backend (Application Server)**
+   - **Node.js** (with **Express.js**) or **Python** (with **FastAPI** or **Django**):
+     - **Node.js + Express.js**: Good for building highly scalable applications, especially if you plan to use JavaScript for both front-end and back-end.
+     - **Python + FastAPI**: FastAPI is highly performant, supports asynchronous operations, and is easy to use for REST APIs. If you're dealing with heavy scientific data processing, Python's extensive libraries make it a strong choice.
+     - **Django**: If you prefer Python with a more structured, batteries-included approach, Django would provide a more comprehensive framework.
+
+   - **Asynchronous Frameworks**: Both **Express.js** (Node.js) and **FastAPI** (Python) support asynchronous operations, allowing you to handle multiple file requests concurrently, essential for large-scale file operations.
+
+   **Technologies**: 
+   - **Node.js with Express.js** (if full-stack JavaScript) or 
+   - **Python with FastAPI/Django** (for scientific data processing).
+
+### 3. **Database**
+   - **PostgreSQL**: A powerful, open-source relational database with strong support for data integrity, JSON support, and advanced indexing techniques. It's ideal for structured data like metadata, user information, and version control.
+   - **Elasticsearch**: For search-heavy operations, such as querying file metadata, Elasticsearch can provide faster and more flexible searching than a traditional database.
+   - **Redis**: Use Redis for caching frequently accessed metadata and user sessions, reducing the load on your main database.
+
+   **Technologies**: 
+   - **PostgreSQL** for relational data, 
+   - **Elasticsearch** for metadata search, 
+   - **Redis** for caching.
+
+### 4. **Object Storage for Files**
+   - **Amazon S3**: For storing actual datasets. It’s scalable and supports lifecycle policies (e.g., move to cold storage, delete old files).
+   - **Google Cloud Storage** or **Azure Blob Storage**: If you prefer Google or Azure’s cloud infrastructure.
+   - **MinIO**: If you want on-premise object storage with S3 compatibility, MinIO is a good choice.
+
+   **Technologies**: 
+   - **Amazon S3**, **Google Cloud Storage**, or **MinIO** (on-premise).
+
+### 5. **Load Balancer**
+   - **NGINX**: Can be used both as a load balancer and reverse proxy to distribute incoming requests to different application servers.
+   - **HAProxy**: An alternative to NGINX, optimized for high availability.
+
+   **Technologies**: 
+   - **NGINX** or **HAProxy**.
+
+### 6. **Authentication and Authorization**
+   - **OAuth 2.0** with **JWT**: For secure user authentication and session management. Tools like **Auth0** or **Firebase Authentication** provide ready-made solutions.
+   - **OpenID Connect**: Use this for handling single sign-on (SSO) authentication if you’re working in an institutional environment.
+
+   **Technologies**: 
+   - **OAuth 2.0**, **JWT**, and optionally **Auth0** or **Firebase Authentication**.
+
+### 7. **Microservices and API Gateway**
+   - **Kong API Gateway**: Handles authentication, rate limiting, and version control for APIs. This can help you manage access to your APIs efficiently.
+   - **GraphQL** (optional): If you want a more flexible API, GraphQL allows clients to request exactly the data they need. Combine with REST API for simpler endpoints.
+
+   **Technologies**: 
+   - **Kong API Gateway** and optionally **GraphQL**.
+
+### 8. **Notification Service**
+   - **RabbitMQ** or **Kafka**: For asynchronous notifications (e.g., when a duplicate file is detected). RabbitMQ is simpler for small- to medium-scale systems, while Kafka is better for real-time, high-throughput messaging.
+   - **Firebase Cloud Messaging (FCM)**: For sending push notifications to users.
+   - **Twilio** or **SendGrid**: For sending email or SMS alerts.
+
+   **Technologies**: 
+   - **RabbitMQ** (or **Kafka**) and **Twilio** or **SendGrid**.
+
+### 9. **Monitoring and Logging**
+   - **Prometheus + Grafana**: For real-time monitoring and alerting. You can use Prometheus to gather system metrics (CPU, memory, etc.) and Grafana to visualize them.
+   - **Elasticsearch + Kibana**: Use Elasticsearch for log aggregation and Kibana for searching logs and visualizing system activity.
+
+   **Technologies**: 
+   - **Prometheus + Grafana** for metrics, 
+   - **Elasticsearch + Kibana** for logs.
+
+### 10. **Machine Learning for Duplicate Detection & Recommendations**
+   - **TensorFlow** or **PyTorch**: If you’re building a custom model to detect patterns or duplicates in data files.
+   - **Scikit-learn**: For simpler machine learning models (classification, clustering) that can flag potential duplicate datasets.
+   - **Recommendation Engine**: You can use collaborative filtering techniques for recommending datasets based on user history.
+
+   **Technologies**: 
+   - **TensorFlow**/**PyTorch** for deep learning or **Scikit-learn** for simpler models.
+
+### 11. **DevOps & CI/CD**
+   - **Docker**: For containerizing the application components (frontend, backend, database, etc.).
+   - **Kubernetes**: For orchestration and managing the deployment of your containers in a scalable and resilient way.
+   - **Jenkins**, **CircleCI**, or **GitLab CI**: For continuous integration and deployment (CI/CD) pipelines to automate testing and deployment.
+
+   **Technologies**: 
+   - **Docker**, **Kubernetes**, and **Jenkins**/**CircleCI**/**GitLab CI**.
+
+### 12. **Version Control and Collaboration**
+   - **Git** with **GitHub** or **GitLab**: For version control and managing code repositories. These platforms also support issue tracking and collaboration.
+   - **Postman** or **Swagger**: For API documentation and testing.
+
+   **Technologies**: 
+   - **Git**, **GitHub**/**GitLab**, and **Swagger**/**Postman**.
+
+---
+
+### Summary of Technologies:
+- **Frontend**: React.js, Tailwind CSS, TypeScript
+- **Backend**: Node.js (Express) or Python (FastAPI/Django)
+- **Database**: PostgreSQL, Elasticsearch, Redis
+- **Storage**: Amazon S3, MinIO, Google Cloud Storage
+- **Authentication**: OAuth 2.0, JWT, Auth0
+- **API Gateway**: Kong, GraphQL (optional)
+- **Messaging**: RabbitMQ, Kafka
+- **Monitoring**: Prometheus, Grafana, Elasticsearch, Kibana
+- **ML Frameworks**: TensorFlow, PyTorch, Scikit-learn
+- **DevOps**: Docker, Kubernetes, Jenkins
