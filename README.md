@@ -1,3 +1,24 @@
+## Steps to setup the FastAPI Server
+
+#### 1. Create & Activate a virtual environement
+For Windows
+```
+python3 -m venv venv
+.\venv\Scripts\activate
+```
+#### 2. Install Project Dependencies
+
+```
+pip install requirements.txt
+```
+#### 3. Run the FastAPI Server
+```
+uvicorn app.main:app --reload
+```
+The server will be accessible at http://127.0.0.1:8000
+
+
+
 1. System Overview and Architecture
 2. Data Model and Database Design
 3. Core Functionalities
