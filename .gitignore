@@ -5,3 +5,4 @@ server/app/__pycache__/
 venv/
 server/app/internal/__pycache__/
 server/app/routers/__pycache__/
+server/__pycache__
